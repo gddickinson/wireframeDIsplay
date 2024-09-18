@@ -1,13 +1,19 @@
 import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QComboBox, QPushButton,
                              QSlider, QLabel, QMessageBox, QGroupBox, QCheckBox, QColorDialog, QAction,
-                             QFileDialog, QSpinBox, QListWidget, QSplitter, QDialog)
-from PyQt5.QtCore import Qt, QTime, QTimer
+                             QFileDialog, QSpinBox, QListWidget, QSplitter, QDialog, QFormLayout, QMenu, QDoubleSpinBox,
+                             QDialogButtonBox, QInputDialog, QLineEdit)
+
+from PyQt5.QtCore import Qt, QTimer, QTime, QPointF
+from PyQt5.QtGui import QVector3D, QMatrix4x4, QColor
 from PyQt5.QtGui import QColor
 import pyqtgraph.opengl as gl
 import numpy as np
 from wireframe import Wireframe
 from shape_loader_dialog import ShapeLoaderDialog
+
+import numpy as np
+
 
 class SceneObject:
     def __init__(self, wireframe, position=(0, 0, 0), rotation=(0, 0, 0), scale=(1, 1, 1)):
@@ -20,36 +26,87 @@ class SceneObject:
         self.mesh_item = None
         self.edge_item = None
         self.vertex_item = None
+        self.center = self.calculate_center()
+        self.original_color = (0.7, 0.7, 0.7, 1.0)  # Light gray
+        self.hover_color = (1.0, 0.0, 0.0, 1.0)  # Bright red
+        self.current_color = self.original_color
+        # New properties
+        self.name = "Unnamed Object"
+        self.mass = 1.0
+        self.rotation_speed = np.zeros(3)  # x, y, z rotation speeds
+        self.is_animated = False
+
+        print(f"SceneObject initialized with color: {self.current_color}")
+
+    def set_name(self, name):
+        self.name = name
+
+    def set_mass(self, mass):
+        self.mass = max(0.1, mass)  # Ensure mass is positive
+
+    def set_rotation_speed(self, x, y, z):
+        self.rotation_speed = np.array([x, y, z])
+
+    def set_scale(self, x, y, z):
+        self.scale = np.array([x, y, z])
+        self.update_mesh(None)  # Update mesh to reflect new scale
+
+    def toggle_animation(self):
+        self.is_animated = not self.is_animated
+
+    def update_animation(self, dt):
+        if self.is_animated:
+            self.rotation += self.rotation_speed * dt
+            self.update_mesh(None)
+
+    def set_hover_color(self):
+        #print(f"Setting hover color: {self.hover_color}")
+        self.current_color = self.hover_color
+        self.update_color()
+
+    def reset_color(self):
+        #print(f"Resetting to original color: {self.original_color}")
+        self.current_color = self.original_color
+        self.update_color()
+
+    def update_color(self):
+        if self.mesh_item:
+            #print(f"Updating mesh item color to: {self.current_color}")
+            self.mesh_item.setColor(self.current_color)
+            # Force update of the mesh data to trigger a redraw
+            if hasattr(self.mesh_item, 'meshData'):
+                vertices = self.mesh_item.meshData.vertexes()
+                faces = self.mesh_item.meshData.faces()
+                self.mesh_item.setMeshData(vertexes=vertices, faces=faces, color=self.current_color)
+            else:
+                print("Mesh item does not have meshData attribute")
+        else:
+            print("Mesh item is None, color not updated")
 
     def update_mesh(self, display_options):
+        transformed_vertices = self.get_transformed_vertices()
+
         if self.mesh_item is None:
-            self.mesh_item = gl.GLMeshItem(vertexes=self.wireframe.vertices, faces=self.wireframe.faces,
-                                           smooth=True, drawEdges=True, edgeColor=(0, 1, 0, 1))
-        self.apply_transformation()
+            #print("Creating new mesh item")
+            self.mesh_item = gl.GLMeshItem(vertexes=transformed_vertices, faces=self.wireframe.faces,
+                                           smooth=True, drawEdges=True, edgeColor=(0, 0, 0, 1))
+            self.mesh_item.setColor(self.current_color)
+        else:
+            #print("Updating existing mesh item")
+            self.mesh_item.setMeshData(vertexes=transformed_vertices, faces=self.wireframe.faces, color=self.current_color)
 
-        # Update display options
         self.mesh_item.setVisible(display_options.show_faces.isChecked())
-        self.mesh_item.setColor(display_options.face_color_btn.color.getRgbF())
+        #print(f"Mesh visibility set to: {display_options.show_faces.isChecked()}")
 
-        if display_options.show_edges.isChecked():
-            if self.edge_item is None:
-                self.edge_item = gl.GLLinePlotItem()
-            self.edge_item.setData(pos=self.wireframe.vertices, color=display_options.edge_color_btn.color.getRgbF(),
-                                   width=display_options.edge_width.value(), antialias=True, mode='lines')
-        else:
-            self.edge_item = None
+    def get_center(self):
+        return np.array(self.center) + np.array(self.position)
 
-        if display_options.show_vertices.isChecked():
-            if self.vertex_item is None:
-                self.vertex_item = gl.GLScatterPlotItem()
-            self.vertex_item.setData(pos=self.wireframe.vertices, color=display_options.vertex_color_btn.color.getRgbF(),
-                                     size=display_options.vertex_size.value())
-        else:
-            self.vertex_item = None
+    def calculate_center(self):
+        return np.mean(self.wireframe.vertices, axis=0)
 
-    def apply_transformation(self):
+    def get_transformed_vertices(self):
         # Apply scale
-        scaled_vertices = self.wireframe.vertices * self.scale
+        scaled_vertices = (self.wireframe.vertices - self.center) * self.scale + self.center
 
         # Apply rotation
         rotation_x = np.array([[1, 0, 0],
@@ -62,12 +119,66 @@ class SceneObject:
                                [np.sin(self.rotation[2]), np.cos(self.rotation[2]), 0],
                                [0, 0, 1]])
         rotation_matrix = np.dot(rotation_z, np.dot(rotation_y, rotation_x))
-        rotated_vertices = np.dot(scaled_vertices, rotation_matrix.T)
+        rotated_vertices = np.dot(scaled_vertices - self.center, rotation_matrix.T) + self.center
 
         # Apply translation
-        translated_vertices = rotated_vertices + self.position
+        return rotated_vertices + self.position
 
-        self.mesh_item.setMeshData(vertexes=translated_vertices, faces=self.wireframe.faces)
+    def update_center(self):
+        self.center = self.calculate_center()
+
+
+    def apply_transformation(self):
+        if self.mesh_item:
+            # Apply scale
+            scaled_vertices = (self.wireframe.vertices - self.center) * self.scale + self.center
+
+            # Apply rotation
+            rotation_x = np.array([[1, 0, 0],
+                                   [0, np.cos(self.rotation[0]), -np.sin(self.rotation[0])],
+                                   [0, np.sin(self.rotation[0]), np.cos(self.rotation[0])]])
+            rotation_y = np.array([[np.cos(self.rotation[1]), 0, np.sin(self.rotation[1])],
+                                   [0, 1, 0],
+                                   [-np.sin(self.rotation[1]), 0, np.cos(self.rotation[1])]])
+            rotation_z = np.array([[np.cos(self.rotation[2]), -np.sin(self.rotation[2]), 0],
+                                   [np.sin(self.rotation[2]), np.cos(self.rotation[2]), 0],
+                                   [0, 0, 1]])
+            rotation_matrix = np.dot(rotation_z, np.dot(rotation_y, rotation_x))
+            rotated_vertices = np.dot(scaled_vertices - self.center, rotation_matrix.T) + self.center
+
+            # Apply translation
+            translated_vertices = rotated_vertices + self.position
+
+            self.mesh_item.setMeshData(vertexes=translated_vertices, faces=self.wireframe.faces)
+
+            if self.edge_item:
+                self.edge_item.setData(pos=translated_vertices)
+
+            if self.vertex_item:
+                self.vertex_item.setData(pos=translated_vertices)
+
+    def translate(self, dx, dy, dz):
+        self.position += np.array([dx, dy, dz])
+
+    def rotate(self, rx, ry, rz):
+        self.rotation += np.array([rx, ry, rz])
+
+    def scale_object(self, sx, sy, sz):
+        self.scale *= np.array([sx, sy, sz])
+        self.update_center()
+
+    def cleanup(self):
+        """Remove all items associated with this object from the view."""
+        if self.mesh_item:
+            self.mesh_item.setParent(None)
+            self.mesh_item = None
+        if self.edge_item:
+            self.edge_item.setParent(None)
+            self.edge_item = None
+        if self.vertex_item:
+            self.vertex_item.setParent(None)
+            self.vertex_item = None
+
 
 class Scene:
     def __init__(self):
@@ -147,6 +258,62 @@ class DisplayOptionsDialog(QDialog):
 
         self.setLayout(layout)
 
+class ObjectPropertiesDialog(QDialog):
+    def __init__(self, scene_object, parent=None):
+        super().__init__(parent)
+        self.scene_object = scene_object
+        self.setWindowTitle(f"Properties: {scene_object.name}")
+        self.initUI()
+
+    def initUI(self):
+        layout = QFormLayout()
+
+        self.name_input = QLineEdit(self.scene_object.name)
+        layout.addRow("Name:", self.name_input)
+
+        self.mass_input = QDoubleSpinBox()
+        self.mass_input.setRange(0.1, 1000)
+        self.mass_input.setValue(self.scene_object.mass)
+        layout.addRow("Mass:", self.mass_input)
+
+        self.scale_x = QDoubleSpinBox()
+        self.scale_y = QDoubleSpinBox()
+        self.scale_z = QDoubleSpinBox()
+        for spinbox in (self.scale_x, self.scale_y, self.scale_z):
+            spinbox.setRange(0.1, 10)
+            spinbox.setSingleStep(0.1)
+            spinbox.setValue(1)
+        layout.addRow("Scale X:", self.scale_x)
+        layout.addRow("Scale Y:", self.scale_y)
+        layout.addRow("Scale Z:", self.scale_z)
+
+        self.rot_speed_x = QDoubleSpinBox()
+        self.rot_speed_y = QDoubleSpinBox()
+        self.rot_speed_z = QDoubleSpinBox()
+        for spinbox in (self.rot_speed_x, self.rot_speed_y, self.rot_speed_z):
+            spinbox.setRange(-10, 10)
+            spinbox.setSingleStep(0.1)
+            spinbox.setValue(0)
+        layout.addRow("Rotation Speed X:", self.rot_speed_x)
+        layout.addRow("Rotation Speed Y:", self.rot_speed_y)
+        layout.addRow("Rotation Speed Z:", self.rot_speed_z)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+        self.setLayout(layout)
+
+    def get_values(self):
+        return {
+            "name": self.name_input.text(),
+            "mass": self.mass_input.value(),
+            "scale": (self.scale_x.value(), self.scale_y.value(), self.scale_z.value()),
+            "rotation_speed": (self.rot_speed_x.value(), self.rot_speed_y.value(), self.rot_speed_z.value())
+        }
+
+
 class WireframeViewer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -156,7 +323,10 @@ class WireframeViewer(QMainWindow):
         self.animation_timer.timeout.connect(self.update_scene)
         self.animation_timer.start(16)  # ~60 FPS
         self.last_time = QTime.currentTime()
-        self.is_playing = False  # New attribute to track if animation is playing
+        self.is_playing = False
+        self.selected_object = None
+        self.last_mouse_pos = None
+        self.hovered_object = None
 
 
     def initUI(self):
@@ -177,6 +347,8 @@ class WireframeViewer(QMainWindow):
         left_layout = QVBoxLayout(left_panel)
 
         self.object_list = QListWidget()
+        self.object_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.object_list.customContextMenuRequested.connect(self.show_context_menu)
         left_layout.addWidget(QLabel("Scene Objects:"))
         left_layout.addWidget(self.object_list)
 
@@ -229,6 +401,18 @@ class WireframeViewer(QMainWindow):
         self.display_options = DisplayOptionsDialog(self)
         self.setup_display_options()
 
+        # Set up mouse interaction for the GLViewWidget
+        self.view.mousePressEvent = self.mousePressEvent
+        self.view.mouseMoveEvent = self.mouseMoveEvent
+        self.view.mouseReleaseEvent = self.mouseReleaseEvent
+
+        # Modify the object_list to handle double clicks
+        self.object_list.itemDoubleClicked.connect(self.center_view_on_object)
+
+        # Set up mouse tracking for hover effect
+        self.view.setMouseTracking(True)
+        self.view.mouseMoveEvent = self.mouseMoveEvent
+
     def create_menus(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu('File')
@@ -250,6 +434,30 @@ class WireframeViewer(QMainWindow):
         load_shape_action = QAction('Load Shape', self)
         load_shape_action.triggered.connect(self.show_shape_loader)
         shape_menu.addAction(load_shape_action)
+
+    def show_context_menu(self, position):
+        item = self.object_list.itemAt(position)
+        if item is not None:
+            index = self.object_list.row(item)
+            scene_object = self.scene.objects[index]
+
+            context_menu = QMenu(self)
+            rename_action = context_menu.addAction("Rename")
+            delete_action = context_menu.addAction("Delete")
+            properties_action = context_menu.addAction("Properties")
+            toggle_animation_action = context_menu.addAction("Toggle Animation")
+
+            action = context_menu.exec_(self.object_list.mapToGlobal(position))
+
+            if action == rename_action:
+                self.rename_object(scene_object)
+            elif action == delete_action:
+                self.delete_object(index)
+            elif action == properties_action:
+                self.show_properties_dialog(scene_object)
+            elif action == toggle_animation_action:
+                scene_object.toggle_animation()
+
 
     def setup_display_options(self):
         self.display_options.show_faces.setChecked(True)
@@ -400,8 +608,10 @@ class WireframeViewer(QMainWindow):
             obj.update_mesh(self.display_options)
 
     def update_display(self):
+        #print("Updating display")
         for obj in self.scene.objects:
             obj.update_mesh(self.display_options)
+        self.view.update()
 
 
     def open_file(self):
@@ -501,6 +711,68 @@ class WireframeViewer(QMainWindow):
         # Ensure the object_list and scene.objects are in sync
         self.sync_object_list()
 
+    def rename_object(self, scene_object):
+        new_name, ok = QInputDialog.getText(self, "Rename Object", "Enter new name:", text=scene_object.name)
+        if ok and new_name:
+            scene_object.set_name(new_name)
+            self.update_object_list()
+
+    def delete_object(self, index):
+        if 0 <= index < len(self.scene.objects):
+            # Remove the object from the scene
+            obj_to_remove = self.scene.objects.pop(index)
+
+            # Remove the object's items from the 3D view
+            if obj_to_remove.mesh_item:
+                self.view.removeItem(obj_to_remove.mesh_item)
+            if obj_to_remove.edge_item:
+                self.view.removeItem(obj_to_remove.edge_item)
+            if obj_to_remove.vertex_item:
+                self.view.removeItem(obj_to_remove.vertex_item)
+
+            # Update the object list in the UI
+            self.update_object_list()
+
+            # If the deleted object was the hovered object, reset it
+            if self.hovered_object == obj_to_remove:
+                self.hovered_object = None
+
+            # If the deleted object was the selected object, reset it
+            if self.selected_object == obj_to_remove:
+                self.selected_object = None
+
+            print(f"Object at index {index} deleted and removed from view")
+        else:
+            print(f"Invalid index {index} for object deletion")
+
+
+    def show_properties_dialog(self, scene_object):
+        dialog = ObjectPropertiesDialog(scene_object, self)
+        if dialog.exec_():
+            values = dialog.get_values()
+            scene_object.set_name(values["name"])
+            scene_object.set_mass(values["mass"])
+            scene_object.set_scale(*values["scale"])
+            scene_object.set_rotation_speed(*values["rotation_speed"])
+            self.update_object_list()
+            self.update_display()
+
+    def update_object_list(self):
+        self.object_list.clear()
+        for obj in self.scene.objects:
+            self.object_list.addItem(obj.name)
+
+    def update_scene(self):
+        current_time = QTime.currentTime()
+        dt = self.last_time.msecsTo(current_time) / 1000.0
+        self.last_time = current_time
+
+        for obj in self.scene.objects:
+            obj.update_animation(dt)
+
+        self.update_display()
+
+
     def sync_object_list(self):
         # Clear the object_list
         self.object_list.clear()
@@ -520,16 +792,16 @@ class WireframeViewer(QMainWindow):
             self.play_button.setText('Pause')
             self.last_time = QTime.currentTime()
 
-    def update_scene(self):
-        current_time = QTime.currentTime()
+    # def update_scene(self):
+    #     current_time = QTime.currentTime()
 
-        if self.is_playing:
-            dt = self.last_time.msecsTo(current_time) / 1000.0
-            self.scene.update_physics(dt)
+    #     if self.is_playing:
+    #         dt = self.last_time.msecsTo(current_time) / 1000.0
+    #         self.scene.update_physics(dt)
 
-        self.last_time = current_time
-        self.scene.apply_transformations()
-        self.update_display()
+    #     self.last_time = current_time
+    #     self.scene.apply_transformations()
+    #     self.update_display()
 
 
     def load_basic_shape(self, shape_name):
@@ -597,7 +869,145 @@ class WireframeViewer(QMainWindow):
             print(f"Debug - WireframeViewer: Error loading super-resolution data: {str(e)}")
             raise
 
+    def mouseMoveEvent(self, event):
+        pos = QPointF(event.x(), event.y())
+        new_hovered_object = self.get_object_at_position(pos)
+        #print(f"Mouse moved to ({event.x()}, {event.y()})")
+        #print(f"New hovered object: {new_hovered_object}")
 
+        if new_hovered_object != self.hovered_object:
+            #print("Hover object changed")
+            if self.hovered_object:
+                #print(f"Resetting color of previously hovered object: {self.hovered_object}")
+                self.hovered_object.reset_color()
+
+            self.hovered_object = new_hovered_object
+            if self.hovered_object:
+                #print(f"Setting hover color for new hovered object: {self.hovered_object}")
+                self.hovered_object.set_hover_color()
+
+            self.update_display()
+
+        # Handle dragging for selected object
+        if self.selected_object and event.buttons() & Qt.LeftButton:
+            dx = event.x() - self.last_mouse_pos.x()
+            dy = event.y() - self.last_mouse_pos.y()
+
+            if event.modifiers() & Qt.ControlModifier:
+                self.selected_object.translate(-dx * 0.01, dy * 0.01, 0)
+            else:
+                self.selected_object.rotate(-dy * 0.01, -dx * 0.01, 0)
+
+            self.selected_object.apply_transformation()
+            self.update_display()
+
+        self.last_mouse_pos = event.pos()
+
+
+    def center_view_on_object(self, item):
+        index = self.object_list.row(item)
+        if 0 <= index < len(self.scene.objects):
+            obj = self.scene.objects[index]
+            center = obj.get_center()
+            # Convert NumPy array to QVector3D
+            center_qvector = QVector3D(center[0], center[1], center[2])
+
+            # Get the current distance of the camera from the center
+            current_distance = (self.view.cameraPosition() - self.view.opts['center']).length()
+
+            # Set the new center
+            self.view.opts['center'] = center_qvector
+
+            # Calculate the new camera position
+            camera_vector = self.view.cameraPosition() - self.view.opts['center']
+            camera_vector = camera_vector.normalized() * current_distance
+            new_camera_pos = center_qvector + camera_vector
+
+            # Update the camera position
+            self.view.setCameraPosition(pos=new_camera_pos)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.selected_object = None
+            self.last_mouse_pos = None
+
+
+    def get_object_at_position(self, pos):
+        ray_start, ray_direction = self.calculate_camera_ray(pos)
+        if ray_start is None or ray_direction is None:
+            print("Failed to calculate camera ray")
+            return None
+
+        # Convert QVector3D to NumPy arrays
+        ray_start = np.array([ray_start.x(), ray_start.y(), ray_start.z()])
+        ray_direction = np.array([ray_direction.x(), ray_direction.y(), ray_direction.z()])
+
+        closest_object = None
+        min_distance = float('inf')
+
+        for obj in self.scene.objects:
+            object_center = obj.get_center()
+
+            # Calculate the closest point on the ray to the object's center
+            t = np.dot(object_center - ray_start, ray_direction)
+            closest_point = ray_start + t * ray_direction
+
+            # Calculate the distance from the closest point to the object's center
+            distance = np.linalg.norm(object_center - closest_point)
+
+            #print(f"Object: {obj}, Distance: {distance}")
+
+            # Update the closest object if this one is closer
+            if distance < min_distance:
+                min_distance = distance
+                closest_object = obj
+
+        # Return the closest object if it's within a certain threshold distance
+        threshold = 1.0  # Increased threshold for easier selection
+        result = closest_object if min_distance < threshold else None
+        #rint(f"Closest object: {result}, Distance: {min_distance}")
+        return result
+
+    def calculate_camera_ray(self, pos):
+        # Get the view matrix
+        view_matrix = self.view.viewMatrix()
+
+        # Get the projection matrix
+        projection_matrix = self.view.projectionMatrix()
+
+        # Combine view and projection matrices
+        view_projection_matrix = projection_matrix * view_matrix
+
+        # Invert the combined matrix
+        inverse_matrix, invertible = view_projection_matrix.inverted()
+        if not invertible:
+            print("Error: View projection matrix is not invertible")
+            return None, None
+
+        # Calculate near and far points in normalized device coordinates
+        x = (2.0 * pos.x()) / self.view.width() - 1.0
+        y = 1.0 - (2.0 * pos.y()) / self.view.height()
+        near_point = QVector3D(x, y, -1.0)
+        far_point = QVector3D(x, y, 1.0)
+
+        # Transform near and far points to world coordinates
+        near_point = inverse_matrix.map(near_point)
+        far_point = inverse_matrix.map(far_point)
+
+        # Calculate ray direction
+        ray_direction = (far_point - near_point).normalized()
+
+        return near_point, ray_direction
+
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.last_mouse_pos = event.pos()
+            self.selected_object = self.get_object_at_position(QPointF(event.x(), event.y()))
+            if self.selected_object:
+                print(f"Selected object: {self.selected_object}")  # Debug print
+            else:
+                print("No object selected")  # Debug print
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
